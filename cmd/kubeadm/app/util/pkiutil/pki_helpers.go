@@ -24,6 +24,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
@@ -503,14 +504,30 @@ func CertificateRequestFromFile(file string) (*x509.CertificateRequest, error) {
 }
 
 // NewCSR creates a new CSR
-func NewCSR(cfg CertConfig, key crypto.Signer) (*x509.CertificateRequest, error) {
+func NewCSR(cfg CertConfig, key crypto.Signer) (_ *x509.CertificateRequest, err error) {
+	usages := make([]asn1.ObjectIdentifier, len(cfg.Usages))
+	for i, eku := range cfg.Usages {
+		if oid, ok := oidFromExtKeyUsage(eku); ok {
+			usages[i] = oid
+		} else {
+			panic("internal error")
+		}
+	}
+	extendedUsage := pkix.Extension{
+		Id: oidExtensionExtendedKeyUsage,
+	}
+	extendedUsage.Value, err = asn1.Marshal(usages)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to asn1 encode extended usages")
+	}
 	template := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			CommonName:   cfg.CommonName,
 			Organization: cfg.Organization,
 		},
-		DNSNames:    cfg.AltNames.DNSNames,
-		IPAddresses: cfg.AltNames.IPs,
+		DNSNames:        cfg.AltNames.DNSNames,
+		IPAddresses:     cfg.AltNames.IPs,
+		ExtraExtensions: []pkix.Extension{extendedUsage},
 	}
 
 	csrBytes, err := x509.CreateCertificateRequest(cryptorand.Reader, template, key)
@@ -584,4 +601,67 @@ func NewSignedCert(cfg *CertConfig, key crypto.Signer, caCert *x509.Certificate,
 		return nil, err
 	}
 	return x509.ParseCertificate(certDERBytes)
+}
+
+// Copied from x509.go
+
+var oidExtensionExtendedKeyUsage = []int{2, 5, 29, 37}
+
+// RFC 5280, 4.2.1.12  Extended Key Usage
+//
+// anyExtendedKeyUsage OBJECT IDENTIFIER ::= { id-ce-extKeyUsage 0 }
+//
+// id-kp OBJECT IDENTIFIER ::= { id-pkix 3 }
+//
+// id-kp-serverAuth             OBJECT IDENTIFIER ::= { id-kp 1 }
+// id-kp-clientAuth             OBJECT IDENTIFIER ::= { id-kp 2 }
+// id-kp-codeSigning            OBJECT IDENTIFIER ::= { id-kp 3 }
+// id-kp-emailProtection        OBJECT IDENTIFIER ::= { id-kp 4 }
+// id-kp-timeStamping           OBJECT IDENTIFIER ::= { id-kp 8 }
+// id-kp-OCSPSigning            OBJECT IDENTIFIER ::= { id-kp 9 }
+var (
+	oidExtKeyUsageAny                            = asn1.ObjectIdentifier{2, 5, 29, 37, 0}
+	oidExtKeyUsageServerAuth                     = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 1}
+	oidExtKeyUsageClientAuth                     = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 2}
+	oidExtKeyUsageCodeSigning                    = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 3}
+	oidExtKeyUsageEmailProtection                = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 4}
+	oidExtKeyUsageIPSECEndSystem                 = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 5}
+	oidExtKeyUsageIPSECTunnel                    = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 6}
+	oidExtKeyUsageIPSECUser                      = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 7}
+	oidExtKeyUsageTimeStamping                   = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 8}
+	oidExtKeyUsageOCSPSigning                    = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 9}
+	oidExtKeyUsageMicrosoftServerGatedCrypto     = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 10, 3, 3}
+	oidExtKeyUsageNetscapeServerGatedCrypto      = asn1.ObjectIdentifier{2, 16, 840, 1, 113730, 4, 1}
+	oidExtKeyUsageMicrosoftCommercialCodeSigning = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 2, 1, 22}
+	oidExtKeyUsageMicrosoftKernelCodeSigning     = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 61, 1, 1}
+)
+
+// extKeyUsageOIDs contains the mapping between an ExtKeyUsage and its OID.
+var extKeyUsageOIDs = []struct {
+	extKeyUsage x509.ExtKeyUsage
+	oid         asn1.ObjectIdentifier
+}{
+	{x509.ExtKeyUsageAny, oidExtKeyUsageAny},
+	{x509.ExtKeyUsageServerAuth, oidExtKeyUsageServerAuth},
+	{x509.ExtKeyUsageClientAuth, oidExtKeyUsageClientAuth},
+	{x509.ExtKeyUsageCodeSigning, oidExtKeyUsageCodeSigning},
+	{x509.ExtKeyUsageEmailProtection, oidExtKeyUsageEmailProtection},
+	{x509.ExtKeyUsageIPSECEndSystem, oidExtKeyUsageIPSECEndSystem},
+	{x509.ExtKeyUsageIPSECTunnel, oidExtKeyUsageIPSECTunnel},
+	{x509.ExtKeyUsageIPSECUser, oidExtKeyUsageIPSECUser},
+	{x509.ExtKeyUsageTimeStamping, oidExtKeyUsageTimeStamping},
+	{x509.ExtKeyUsageOCSPSigning, oidExtKeyUsageOCSPSigning},
+	{x509.ExtKeyUsageMicrosoftServerGatedCrypto, oidExtKeyUsageMicrosoftServerGatedCrypto},
+	{x509.ExtKeyUsageNetscapeServerGatedCrypto, oidExtKeyUsageNetscapeServerGatedCrypto},
+	{x509.ExtKeyUsageMicrosoftCommercialCodeSigning, oidExtKeyUsageMicrosoftCommercialCodeSigning},
+	{x509.ExtKeyUsageMicrosoftKernelCodeSigning, oidExtKeyUsageMicrosoftKernelCodeSigning},
+}
+
+func oidFromExtKeyUsage(eku x509.ExtKeyUsage) (oid asn1.ObjectIdentifier, ok bool) {
+	for _, pair := range extKeyUsageOIDs {
+		if eku == pair.extKeyUsage {
+			return pair.oid, true
+		}
+	}
+	return
 }
