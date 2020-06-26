@@ -34,6 +34,9 @@ filegroup(
 
 filegroup(
     name = "all-srcs",
-    srcs = [":package-srcs"],
+    srcs = [
+        ":package-srcs",
+        "//cmd/kubeadm/app/util/kubeconfig/builder:all-srcs",
+    ],
     tags = ["automanaged"],
 )
