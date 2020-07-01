@@ -31,12 +31,12 @@ import (
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/client-go/util/keyutil"
 	"k8s.io/klog/v2"
+
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
-	pkiutil "k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
-
 	kubeconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
+	pkiutil "k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
 )
 
 // clientCertAuth struct holds info required to build a client certificate to provide authentication info in a kubeconfig object
@@ -66,6 +66,20 @@ type kubeConfigSpec struct {
 func CreateJoinControlPlaneKubeConfigFiles(outDir string, cfg *kubeadmapi.InitConfiguration) error {
 	return createKubeConfigFiles(
 		outDir,
+		cfg,
+		kubeadmconstants.AdminKubeConfigFileName,
+		kubeadmconstants.ControllerManagerKubeConfigFileName,
+		kubeadmconstants.SchedulerKubeConfigFileName,
+	)
+}
+
+// CreateJoinControlPlaneKubeConfigAndCSRFiles will create and write to disk the kubeconfig files required by kubeadm
+// join --control-plane workflow, plus the admin kubeconfig file used by the administrator and kubeadm itself.
+// This is a variant of CreateJoinControlPlaneKubeConfigFiles which generates
+// CSR files instead of signed certificates.
+func CreateJoinControlPlaneKubeConfigAndCSRFiles(kubeConfigDir string, cfg *kubeadmapi.InitConfiguration) error {
+	return createKubeConfigAndCSRFiles(
+		kubeConfigDir,
 		cfg,
 		kubeadmconstants.AdminKubeConfigFileName,
 		kubeadmconstants.ControllerManagerKubeConfigFileName,
@@ -103,7 +117,7 @@ func createKubeConfigFiles(outDir string, cfg *kubeadmapi.InitConfiguration, kub
 			return err
 		}
 
-		// writes the kubeconfig to disk if it not exists
+		// writes the kubeconfig to disk if it does not exist
 		if err = createKubeConfigFileIfNotExists(outDir, kubeConfigFileName, config); err != nil {
 			return err
 		}
@@ -112,15 +126,48 @@ func createKubeConfigFiles(outDir string, cfg *kubeadmapi.InitConfiguration, kub
 	return nil
 }
 
-// getKubeConfigSpecs returns all KubeConfigSpecs actualized to the context of the current InitConfiguration
-// NB. this methods holds the information about how kubeadm creates kubeconfig files.
-func getKubeConfigSpecs(cfg *kubeadmapi.InitConfiguration) (map[string]*kubeConfigSpec, error) {
+// createKubeConfigAndCSRFiles creates all the requested kubeconfig files.
+// If kubeconfig files already exists, they are used only if evaluated equal; otherwise an error is returned.
+// This is a variant for use in CreateJoinControlPlaneKubeConfigAndCSRFiles which generates
+// CSR files instead of signed certificates.
+func createKubeConfigAndCSRFiles(kubeConfigDir string, cfg *kubeadmapi.InitConfiguration, kubeConfigFileNames ...string) error {
 
-	caCert, caKey, err := pkiutil.TryLoadCertAndKeyFromDisk(cfg.CertificatesDir, kubeadmconstants.CACertAndKeyBaseName)
+	// gets the KubeConfigSpecs, actualized for the current InitConfiguration
+	specs, err := getKubeConfigSpecsBase(cfg)
 	if err != nil {
-		return nil, errors.Wrap(err, "couldn't create a kubeconfig; the CA files couldn't be loaded")
+		return err
 	}
 
+	for _, kubeConfigFileName := range kubeConfigFileNames {
+		// retrieves the KubeConfigSpec for given kubeConfigFileName
+		spec, exists := specs[kubeConfigFileName]
+		if !exists {
+			return errors.Errorf("couldn't retrieve KubeConfigSpec for %s", kubeConfigFileName)
+		}
+
+		// builds the KubeConfig object
+		config, csr, err := buildKubeConfigAndCSRFromSpec(spec, cfg.ClusterName)
+		if err != nil {
+			return err
+		}
+
+		// writes the kubeconfig to disk if it not exists
+		if err = createKubeConfigFileIfNotExists(kubeConfigDir, kubeConfigFileName, config); err != nil {
+			return err
+		}
+		// Write CSR to disk
+		if err := pkiutil.WriteCSR(kubeConfigDir, kubeConfigFileName, csr); err != nil {
+			return errors.Wrap(err, "failed to write CSR file")
+		}
+	}
+
+	return nil
+}
+
+// getKubeConfigSpecsBase returns all KubeConfigSpecs without CA key or certificiate.
+// This can be used when the kubeconfig files are to be generated using client
+// certificates signed by an external CA.
+func getKubeConfigSpecsBase(cfg *kubeadmapi.InitConfiguration) (map[string]*kubeConfigSpec, error) {
 	controlPlaneEndpoint, err := kubeadmutil.GetControlPlaneEndpoint(cfg.ControlPlaneEndpoint, &cfg.LocalAPIEndpoint)
 	if err != nil {
 		return nil, err
@@ -128,39 +175,51 @@ func getKubeConfigSpecs(cfg *kubeadmapi.InitConfiguration) (map[string]*kubeConf
 
 	var kubeConfigSpec = map[string]*kubeConfigSpec{
 		kubeadmconstants.AdminKubeConfigFileName: {
-			CACert:     caCert,
 			APIServer:  controlPlaneEndpoint,
 			ClientName: "kubernetes-admin",
 			ClientCertAuth: &clientCertAuth{
-				CAKey:         caKey,
 				Organizations: []string{kubeadmconstants.SystemPrivilegedGroup},
 			},
 		},
 		kubeadmconstants.KubeletKubeConfigFileName: {
-			CACert:     caCert,
 			APIServer:  controlPlaneEndpoint,
 			ClientName: fmt.Sprintf("%s%s", kubeadmconstants.NodesUserPrefix, cfg.NodeRegistration.Name),
 			ClientCertAuth: &clientCertAuth{
-				CAKey:         caKey,
 				Organizations: []string{kubeadmconstants.NodesGroup},
 			},
 		},
 		kubeadmconstants.ControllerManagerKubeConfigFileName: {
-			CACert:     caCert,
-			APIServer:  controlPlaneEndpoint,
-			ClientName: kubeadmconstants.ControllerManagerUser,
-			ClientCertAuth: &clientCertAuth{
-				CAKey: caKey,
-			},
+			APIServer:      controlPlaneEndpoint,
+			ClientName:     kubeadmconstants.ControllerManagerUser,
+			ClientCertAuth: &clientCertAuth{},
 		},
 		kubeadmconstants.SchedulerKubeConfigFileName: {
-			CACert:     caCert,
-			APIServer:  controlPlaneEndpoint,
-			ClientName: kubeadmconstants.SchedulerUser,
-			ClientCertAuth: &clientCertAuth{
-				CAKey: caKey,
-			},
+			APIServer:      controlPlaneEndpoint,
+			ClientName:     kubeadmconstants.SchedulerUser,
+			ClientCertAuth: &clientCertAuth{},
 		},
+	}
+
+	return kubeConfigSpec, nil
+}
+
+// getKubeConfigSpecs returns all KubeConfigSpecs actualized to the context of the current InitConfiguration
+// NB. this method holds the information about how kubeadm creates kubeconfig files.
+func getKubeConfigSpecs(cfg *kubeadmapi.InitConfiguration) (map[string]*kubeConfigSpec, error) {
+
+	caCert, caKey, err := pkiutil.TryLoadCertAndKeyFromDisk(cfg.CertificatesDir, kubeadmconstants.CACertAndKeyBaseName)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't create a kubeconfig; the CA files couldn't be loaded")
+	}
+
+	kubeConfigSpec, err := getKubeConfigSpecsBase(cfg)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't create base kubeConfigSpecs")
+	}
+
+	for _, spec := range kubeConfigSpec {
+		spec.CACert = caCert
+		spec.ClientCertAuth.CAKey = caKey
 	}
 
 	return kubeConfigSpec, nil
@@ -182,13 +241,8 @@ func buildKubeConfigFromSpec(spec *kubeConfigSpec, clustername string) (*clientc
 	}
 
 	// otherwise, create a client certs
-	clientCertConfig := pkiutil.CertConfig{
-		Config: certutil.Config{
-			CommonName:   spec.ClientName,
-			Organization: spec.ClientCertAuth.Organizations,
-			Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		},
-	}
+	clientCertConfig := newClientCertConfigFromKubeConfigSpec(spec)
+
 	clientCert, clientKey, err := pkiutil.NewCertAndKey(spec.CACert, spec.ClientCertAuth.CAKey, &clientCertConfig)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failure while creating %s client certificate", spec.ClientName)
@@ -207,6 +261,52 @@ func buildKubeConfigFromSpec(spec *kubeConfigSpec, clustername string) (*clientc
 		encodedClientKey,
 		pkiutil.EncodeCertPEM(clientCert),
 	), nil
+}
+
+func newClientCertConfigFromKubeConfigSpec(spec *kubeConfigSpec) pkiutil.CertConfig {
+	return pkiutil.CertConfig{
+		Config: certutil.Config{
+			CommonName:   spec.ClientName,
+			Organization: spec.ClientCertAuth.Organizations,
+			Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		},
+	}
+}
+
+// buildKubeConfigAndCSRFromSpec creates a kubeconfig object for the given kubeConfigSpec.
+// This is a variant for use by CreateJoinControlPlaneKubeConfigAndCSRFiles which generates
+// CSR files instead of signed certificates.
+func buildKubeConfigAndCSRFromSpec(spec *kubeConfigSpec, clustername string) (*clientcmdapi.Config, *x509.CertificateRequest, error) {
+	clientCertConfig := newClientCertConfigFromKubeConfigSpec(spec)
+
+	clientKey, err := pkiutil.NewPrivateKey(clientCertConfig.PublicKeyAlgorithm)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "failure while creating %s client certificate", spec.ClientName)
+	}
+	clientCSR, err := pkiutil.NewCSR(clientCertConfig, clientKey)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "failure while creating %s client csr", spec.ClientName)
+	}
+
+	encodedClientKey, err := keyutil.MarshalPrivateKeyToPEM(clientKey)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "failed to marshal private key to PEM")
+	}
+
+	var (
+		emptyCACert     []byte
+		emptyClientCert []byte
+	)
+
+	// create a kubeconfig with the client certs
+	return kubeconfigutil.CreateWithCerts(
+		spec.APIServer,
+		clustername,
+		spec.ClientName,
+		emptyCACert,
+		encodedClientKey,
+		emptyClientCert,
+	), clientCSR, nil
 }
 
 // validateKubeConfig check if the kubeconfig file exist and has the expected CA and server URL
