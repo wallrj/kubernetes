@@ -23,11 +23,16 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"testing"
 
+	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	certutil "k8s.io/client-go/util/cert"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
+	testutil "k8s.io/kubernetes/cmd/kubeadm/test"
 )
 
 func TestCertListOrder(t *testing.T) {
@@ -207,6 +212,312 @@ func TestCreateCertificateChain(t *testing.T) {
 		t.Errorf("couldn't verify daughter cert: %v", err)
 	}
 
+}
+
+func TestLeafCertificates(t *testing.T) {
+	errAny := errors.New("match any error")
+
+	type testCase struct {
+		name          string
+		certificates  Certificates
+		result        Certificates
+		assertion     func(*testing.T, *testCase)
+		setup         func(*testing.T, *testCase)
+		expectedError error
+	}
+	tests := []testCase{
+		{
+			name: "success",
+		},
+		{
+			name: "nil certs",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.certificates = nil
+				tc.assertion = func(t *testing.T, tc *testCase) {
+					assert.Len(t, tc.result, 0)
+				}
+			},
+		},
+		{
+			name: "no certs",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.certificates = Certificates{}
+				tc.assertion = func(t *testing.T, tc *testCase) {
+					assert.Len(t, tc.result, 0)
+				}
+			},
+		},
+		{
+			name: "error unknown ca",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.certificates = Certificates{
+					{Name: "cert1", CAName: "ca1"},
+				}
+			},
+			expectedError: errAny,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.certificates = Certificates{
+				{Name: "ca1"},
+				{Name: "ca1-cert1", CAName: "ca1"},
+				{Name: "ca1-cert2", CAName: "ca1"},
+				{Name: "ca2"},
+				{Name: "ca2-cert1", CAName: "ca2"},
+			}
+
+			if test.assertion == nil {
+				test.assertion = func(t *testing.T, tc *testCase) {
+					assert.Len(t, tc.result, 3)
+				}
+			}
+
+			// A hook to allow tests to change the defaults
+			if test.setup != nil {
+				test.setup(t, &test)
+			}
+
+			var err error
+			test.result, err = LeafCertificates(test.certificates)
+
+			if test.expectedError == nil {
+				require.NoError(t, err)
+				test.assertion(t, &test)
+			} else {
+				if assert.Error(t, err) {
+					if !errors.Is(test.expectedError, errAny) {
+						assert.Truef(t, errors.Is(err, test.expectedError), "unexpected error type: %#v", err)
+					}
+				}
+			}
+
+		})
+	}
+}
+
+func TestCertificatesVisit(t *testing.T) {
+	type testCase struct {
+		name          string
+		certificates  Certificates
+		visitor       certificatesVisitor
+		expectedError error
+		setup         func(t *testing.T, tc *testCase)
+		assertion     func(t *testing.T)
+	}
+
+	tests := []testCase{
+		{
+			name: "success",
+			setup: func(t *testing.T, tc *testCase) {
+				var visited []string
+				tc.visitor = func(cert *KubeadmCert) error {
+					visited = append(visited, cert.Name)
+					return nil
+				}
+				tc.assertion = func(t *testing.T) {
+					assert.Equal(t, []string{"c1", "c2", "c3"}, visited)
+				}
+			},
+		},
+		{
+			name: "nil certificates",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.certificates = nil
+				tc.visitor = func(cert *KubeadmCert) error {
+					panic("should not be called")
+				}
+			},
+		},
+		{
+			name: "empty certificates",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.certificates = Certificates{}
+				tc.visitor = func(cert *KubeadmCert) error {
+					panic("should not be called")
+				}
+			},
+		},
+		{
+			name: "error nil visitor",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.visitor = nil
+			},
+			expectedError: errInvalid,
+		},
+		{
+			name: "visit then error",
+			setup: func(t *testing.T, tc *testCase) {
+				errSentinel := errors.New("sentinel error")
+				var visited []string
+				tc.visitor = func(cert *KubeadmCert) error {
+					if cert.Name == "c2" {
+						return errSentinel
+					}
+					visited = append(visited, cert.Name)
+					return nil
+				}
+				tc.assertion = func(t *testing.T) {
+					assert.Equal(t, []string{"c1"}, visited)
+				}
+				tc.expectedError = errSentinel
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.certificates == nil {
+				test.certificates = Certificates{
+					{Name: "c1"},
+					{Name: "c2"},
+					{Name: "c3"},
+				}
+			}
+			if test.visitor == nil {
+				test.visitor = func(cert *KubeadmCert) error {
+					t.Fail()
+					return nil
+				}
+			}
+			if test.setup != nil {
+				test.setup(t, &test)
+			}
+			err := test.certificates.visit(test.visitor)
+			if test.expectedError == nil {
+				require.NoError(t, err)
+			} else {
+				if assert.Error(t, err) {
+					assert.Truef(t, errors.Is(err, test.expectedError), "unexpected error: %v", err)
+				}
+			}
+			if test.assertion != nil {
+				test.assertion(t)
+			}
+		})
+	}
+
+}
+
+func TestKeyAndCSRCreatorCreate(t *testing.T) {
+	touch := func(t *testing.T, existingFile string) {
+		existingDir := filepath.Dir(existingFile)
+		require.NoError(t, os.MkdirAll(existingDir, os.FileMode(0700)))
+		file, err := os.Create(existingFile)
+		require.NoError(t, err)
+		require.NoError(t, file.Close())
+	}
+
+	type testCase struct {
+		name          string
+		creator       *keyAndCSRCreator
+		cert          *KubeadmCert
+		tmpDir        string
+		setup         func(t *testing.T, tc *testCase)
+		assertion     func(t *testing.T, tc *testCase)
+		expectedError error
+	}
+	tests := []testCase{
+		{
+			name: "success",
+		},
+		{
+			name: "error nil object",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.creator = nil
+			},
+			expectedError: errInvalid,
+		},
+		{
+			name: "error nil cert",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.cert = nil
+			},
+			expectedError: errInvalid,
+		},
+		{
+			name: "error key file exists",
+			setup: func(t *testing.T, tc *testCase) {
+				certDir := tc.creator.kubeadmConfig.ClusterConfiguration.CertificatesDir
+				touch(t, certDir+"/"+tc.cert.BaseName+".key")
+			},
+			expectedError: os.ErrExist,
+		},
+		{
+			name: "error CSR file exists",
+			setup: func(t *testing.T, tc *testCase) {
+				certDir := tc.creator.kubeadmConfig.ClusterConfiguration.CertificatesDir
+				touch(t, certDir+"/"+tc.cert.BaseName+".csr")
+			},
+			expectedError: os.ErrExist,
+		},
+		{
+			name: "error permission denied while creating key",
+			setup: func(t *testing.T, tc *testCase) {
+				certDir := tc.creator.kubeadmConfig.ClusterConfiguration.CertificatesDir
+				require.NoError(t, os.Chmod(certDir, 0500))
+			},
+			expectedError: os.ErrPermission,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tmpDir := testutil.SetupTempDir(t)
+			defer os.RemoveAll(tmpDir)
+
+			test.creator = &keyAndCSRCreator{
+				kubeadmConfig: &kubeadmapi.InitConfiguration{
+					ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+						CertificatesDir: tmpDir,
+					},
+				},
+			}
+			test.cert = &KubeadmCert{BaseName: "cert1"}
+
+			if test.assertion == nil && test.expectedError == nil {
+				test.assertion = func(t *testing.T, tc *testCase) {
+					certDir := tc.creator.kubeadmConfig.ClusterConfiguration.CertificatesDir
+					assert.FileExists(t, certDir+"/"+tc.cert.BaseName+".key")
+					assert.FileExists(t, certDir+"/"+tc.cert.BaseName+".csr")
+				}
+			}
+
+			// A hook to allow tests to change the defaults
+			if test.setup != nil {
+				test.setup(t, &test)
+			}
+
+			err := test.creator.create(test.cert)
+			if test.expectedError == nil {
+				require.NoError(t, err)
+			} else {
+				if assert.Error(t, err) {
+					assert.Truef(t, errors.Is(err, test.expectedError), "unexpected error type: %#v", err)
+				}
+			}
+			if test.assertion != nil {
+				test.assertion(t, &test)
+			}
+		})
+	}
+}
+
+func TestCreateKeyAndCSRFiles(t *testing.T) {
+	tmpDir := testutil.SetupTempDir(t)
+	defer os.RemoveAll(tmpDir)
+
+	err := CreateKeyAndCSRFiles(
+		&kubeadmapi.InitConfiguration{
+			ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+				CertificatesDir: tmpDir,
+			},
+		},
+		Certificates{
+			{BaseName: "cert1"},
+		},
+	)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(tmpDir, "cert1.key"))
+	assert.FileExists(t, filepath.Join(tmpDir, "cert1.csr"))
 }
 
 func parseCertAndKey(basePath string, t *testing.T) (*x509.Certificate, crypto.PrivateKey) {

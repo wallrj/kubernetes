@@ -294,28 +294,30 @@ func TestRenewUsingCSR(t *testing.T) {
 	}
 }
 
-// A minimal kubeadm config with just enough values to avoid triggering
-// auto-detection of config values at runtime.
-const kubeadmConfig = `
-apiVersion: kubeadm.k8s.io/v1beta2
-kind: InitConfiguration
-localAPIEndpoint:
-  advertiseAddress: 192.0.2.1
-nodeRegistration:
-  criSocket: /path/to/dockershim.sock
----
-apiVersion: kubeadm.k8s.io/v1beta2
-kind: ClusterConfiguration
-certificatesDir: /custom/config/certificates-dir
-kubernetesVersion: v1.19.0
-`
-
 func TestRunGenCSR(t *testing.T) {
 	tmpDir := testutil.SetupTempDir(t)
 	defer os.RemoveAll(tmpDir)
 
-	kubeConfigDir := tmpDir + "/kubernetes"
+	kubeConfigDir := filepath.Join(tmpDir, "kubernetes")
 	certDir := kubeConfigDir + "/pki"
+
+	expectedCertificates := []string{
+		"apiserver",
+		"apiserver-etcd-client",
+		"apiserver-kubelet-client",
+		"front-proxy-client",
+		"etcd/healthcheck-client",
+		"etcd/peer",
+		"etcd/server",
+	}
+
+	expectedKubeConfigs := []string{
+		"admin",
+		"kubelet",
+		"controller-manager",
+		"scheduler",
+	}
+
 	config := genCSRConfig{
 		kubeConfigDir: kubeConfigDir,
 		kubeadmConfig: &kubeadmapi.InitConfiguration{
@@ -327,7 +329,8 @@ func TestRunGenCSR(t *testing.T) {
 				Networking: kubeadmapi.Networking{
 					ServiceSubnet: "192.0.2.0/24",
 				},
-				CertificatesDir: certDir,
+				CertificatesDir:   certDir,
+				KubernetesVersion: "v1.19.0",
 			},
 		},
 	}
@@ -335,15 +338,6 @@ func TestRunGenCSR(t *testing.T) {
 	err := runGenCSR(&config)
 	require.NoError(t, err)
 
-	expectedCertificates := []string{
-		"apiserver",
-		"apiserver-etcd-client",
-		"apiserver-kubelet-client",
-		"front-proxy-client",
-		"etcd/healthcheck-client",
-		"etcd/peer",
-		"etcd/server",
-	}
 	t.Log("The command generates key and CSR files in the configured --cert-dir")
 	for _, name := range expectedCertificates {
 		t.Log("::", name)
@@ -352,12 +346,6 @@ func TestRunGenCSR(t *testing.T) {
 
 		_, err = pkiutil.TryLoadCSRFromDisk(certDir, name)
 		assert.NoError(t, err, "failed to load CSR file: %s", name)
-	}
-
-	expectedKubeConfigs := []string{
-		"admin",
-		"controller-manager",
-		"scheduler",
 	}
 
 	t.Log("The command generates kubeconfig files in the configured --kubeconfig-dir")
@@ -369,6 +357,7 @@ func TestRunGenCSR(t *testing.T) {
 		_, err = pkiutil.TryLoadCSRFromDisk(kubeConfigDir, name+".conf")
 		assert.NoError(t, err, "failed to load kubeconfig CSR file: %s", name)
 	}
+
 }
 
 func TestGenCSRConfig(t *testing.T) {
@@ -389,6 +378,22 @@ func TestGenCSRConfig(t *testing.T) {
 			assert.Equal(t, expected, config.kubeadmConfig.LocalAPIEndpoint.AdvertiseAddress)
 		}
 	}
+
+	// A minimal kubeadm config with just enough values to avoid triggering
+	// auto-detection of config values at runtime.
+	const kubeadmConfig = `
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.0.2.1
+nodeRegistration:
+  criSocket: /path/to/dockershim.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+certificatesDir: /custom/config/certificates-dir
+kubernetesVersion: v1.19.0
+`
 
 	tmpDir := testutil.SetupTempDir(t)
 	defer os.RemoveAll(tmpDir)

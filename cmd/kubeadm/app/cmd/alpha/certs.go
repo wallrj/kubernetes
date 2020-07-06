@@ -41,7 +41,6 @@ import (
 	kubeconfigphase "k8s.io/kubernetes/cmd/kubeadm/app/phases/kubeconfig"
 	configutil "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 	kubeconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
-	"k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
 )
 
 var (
@@ -170,36 +169,21 @@ func newCmdGenCSR() *cobra.Command {
 	return cmd
 }
 
-// runGenCSR contains the logic of the generate-csr sub-command after all
-// command line flags have been processed.
+// runGenCSR contains the logic of the generate-csr sub-command.
 func runGenCSR(config *genCSRConfig) error {
-	certDir := config.kubeadmConfig.CertificatesDir
-	certTree, err := certsphase.GetDefaultCertList().AsMap().CertTree()
+	leafCertificates, err := certsphase.LeafCertificates(certsphase.GetDefaultCertList())
 	if err != nil {
 		return err
 	}
-	for _, leafCertificates := range certTree {
-		for _, cert := range leafCertificates {
-			name := cert.BaseName
-			cfg, err := cert.GetConfig(config.kubeadmConfig)
-			if err != nil {
-				return err
-			}
-			csr, key, err := pkiutil.NewCSRAndKey(cfg)
-			if err != nil {
-				return err
-			}
-			err = pkiutil.WriteKey(certDir, name, key)
-			if err != nil {
-				return err
-			}
-			err = pkiutil.WriteCSR(certDir, name, csr)
-			if err != nil {
-				return err
-			}
-		}
+	if err := certsphase.CreateKeyAndCSRFiles(config.kubeadmConfig, leafCertificates); err != nil {
+		return err
 	}
-	if err := kubeconfigphase.CreateJoinControlPlaneKubeConfigAndCSRFiles(config.kubeConfigDir, config.kubeadmConfig); err != nil {
+
+	kubeConfigs, err := kubeconfigphase.GetDefaultKubeConfigs(config.kubeadmConfig)
+	if err != nil {
+		return err
+	}
+	if err := kubeconfigphase.CreateKubeConfigAndCSRFiles(config.kubeConfigDir, config.kubeadmConfig, kubeConfigs); err != nil {
 		return err
 	}
 	return nil

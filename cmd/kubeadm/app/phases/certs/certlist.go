@@ -19,10 +19,13 @@ package certs
 import (
 	"crypto"
 	"crypto/x509"
+	"fmt"
+	"os"
 
 	"github.com/pkg/errors"
 
 	certutil "k8s.io/client-go/util/cert"
+
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
@@ -202,6 +205,22 @@ func (c Certificates) AsMap() CertificateMap {
 	}
 
 	return certMap
+}
+
+var errInvalid = errors.New("invalid argument")
+
+type certificatesVisitor func(*KubeadmCert) error
+
+func (c Certificates) visit(visitor certificatesVisitor) error {
+	if visitor == nil {
+		return fmt.Errorf("%w: visitor was nil", errInvalid)
+	}
+	for _, cert := range c {
+		if err := visitor(cert); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetDefaultCertList returns  all of the certificates kubeadm requires to function.
@@ -396,4 +415,59 @@ func setCommonNameToNodeName() configMutatorsFunc {
 		cc.CommonName = mc.NodeRegistration.Name
 		return nil
 	}
+}
+
+// LeafCertificates returns non-CA certificates from the supplied Certificates.
+func LeafCertificates(c Certificates) (Certificates, error) {
+	certTree, err := c.AsMap().CertTree()
+	if err != nil {
+		return nil, err
+	}
+
+	var out Certificates
+	for _, leafCertificates := range certTree {
+		out = append(out, leafCertificates...)
+	}
+	return out, nil
+}
+
+type keyAndCSRCreator struct {
+	kubeadmConfig *kubeadmapi.InitConfiguration
+}
+
+func (o *keyAndCSRCreator) create(cert *KubeadmCert) error {
+	if o == nil {
+		return fmt.Errorf("%w: create was called on a nil pointer", errInvalid)
+	}
+	if cert == nil {
+		return fmt.Errorf("%w: cert was nil", errInvalid)
+	}
+	certDir := o.kubeadmConfig.CertificatesDir
+	name := cert.BaseName
+	if pkiutil.CSROrKeyExist(certDir, name) {
+		return fmt.Errorf("%w: key or CSR %s/%s", os.ErrExist, certDir, name)
+	}
+	cfg, err := cert.GetConfig(o.kubeadmConfig)
+	if err != nil {
+		return err
+	}
+	csr, key, err := pkiutil.NewCSRAndKey(cfg)
+	if err != nil {
+		return err
+	}
+	err = pkiutil.WriteKey(certDir, name, key)
+	if err != nil {
+		return err
+	}
+	err = pkiutil.WriteCSR(certDir, name, csr)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// CreateKeyAndCSRFiles is used in ExternalCA mode to create key files and
+// adjacent CSR files.
+func CreateKeyAndCSRFiles(config *kubeadmapi.InitConfiguration, certificates Certificates) error {
+	return certificates.visit((&keyAndCSRCreator{kubeadmConfig: config}).create)
 }
