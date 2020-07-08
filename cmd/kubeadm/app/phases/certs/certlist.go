@@ -204,22 +204,6 @@ func (c Certificates) AsMap() CertificateMap {
 	return certMap
 }
 
-var errInvalid = errors.New("invalid argument")
-
-type certificatesVisitor func(*KubeadmCert) error
-
-func (c Certificates) visit(visitor certificatesVisitor) error {
-	if visitor == nil {
-		return errors.Wrap(errInvalid, "visitor was nil")
-	}
-	for _, cert := range c {
-		if err := visitor(cert); err != nil {
-			return errors.WithStack(err)
-		}
-	}
-	return nil
-}
-
 // GetDefaultCertList returns  all of the certificates kubeadm requires to function.
 func GetDefaultCertList() Certificates {
 	return Certificates{
@@ -414,8 +398,8 @@ func setCommonNameToNodeName() configMutatorsFunc {
 	}
 }
 
-// LeafCertificates returns non-CA certificates from the supplied Certificates.
-func LeafCertificates(c Certificates) (Certificates, error) {
+// leafCertificates returns non-CA certificates from the supplied Certificates.
+func leafCertificates(c Certificates) (Certificates, error) {
 	certTree, err := c.AsMap().CertTree()
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -428,25 +412,24 @@ func LeafCertificates(c Certificates) (Certificates, error) {
 	return out, nil
 }
 
-type keyAndCSRCreator struct {
-	kubeadmConfig *kubeadmapi.InitConfiguration
-}
+var (
+	errInvalid = errors.New("invalid argument")
+	errExist   = errors.New("file already exists")
+)
 
-var errExist = errors.New("file already exists")
-
-func (o *keyAndCSRCreator) create(cert *KubeadmCert) error {
-	if o == nil {
-		return errors.Wrap(errInvalid, "create was called on a nil pointer")
+func createKeyAndCSR(kubeadmConfig *kubeadmapi.InitConfiguration, cert *KubeadmCert) error {
+	if kubeadmConfig == nil {
+		return errors.Wrap(errInvalid, "kubeadmConfig was nil")
 	}
 	if cert == nil {
 		return errors.Wrap(errInvalid, "cert was nil")
 	}
-	certDir := o.kubeadmConfig.CertificatesDir
+	certDir := kubeadmConfig.CertificatesDir
 	name := cert.BaseName
 	if pkiutil.CSROrKeyExist(certDir, name) {
 		return errors.Wrapf(errExist, "key or CSR %s/%s", certDir, name)
 	}
-	cfg, err := cert.GetConfig(o.kubeadmConfig)
+	cfg, err := cert.GetConfig(kubeadmConfig)
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -465,8 +448,17 @@ func (o *keyAndCSRCreator) create(cert *KubeadmCert) error {
 	return nil
 }
 
-// CreateKeyAndCSRFiles is used in ExternalCA mode to create key files and
-// adjacent CSR files.
-func CreateKeyAndCSRFiles(config *kubeadmapi.InitConfiguration, certificates Certificates) error {
-	return errors.WithStack(certificates.visit((&keyAndCSRCreator{kubeadmConfig: config}).create))
+// CreateDefaultKeysAndCSRFiles is used in ExternalCA mode to create key files
+// and adjacent CSR files.
+func CreateDefaultKeysAndCSRFiles(config *kubeadmapi.InitConfiguration) error {
+	certificates, err := leafCertificates(GetDefaultCertList())
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	for _, cert := range certificates {
+		if err := createKeyAndCSR(config, cert); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	return nil
 }

@@ -358,39 +358,12 @@ func ValidateKubeconfigsForExternalCA(outDir string, cfg *kubeadmapi.InitConfigu
 	return nil
 }
 
-// KubeConfigs is a mapping between kubeconfig file name and spec
-type KubeConfigs map[string]*kubeConfigSpec
-
-type kubeConfigsVisitor func(string, *kubeConfigSpec) error
-
-// executes the supplied visitor function with each key, value pair.
-func (o KubeConfigs) visit(visitor kubeConfigsVisitor) error {
-	if visitor == nil {
-		return errors.Wrap(errInvalid, "visitor was nil")
-	}
-	for name, spec := range o {
-		if err := visitor(name, spec); err != nil {
-			return errors.WithStack(err)
-		}
-	}
-	return nil
-}
-
-// GetDefaultKubeConfigs returns all KubeConfigSpecs without CA key or certificate.
-func GetDefaultKubeConfigs(cfg *kubeadmapi.InitConfiguration) (KubeConfigs, error) {
-	if cfg == nil {
-		return nil, errors.Wrap(errInvalid, "cfg was nil")
-	}
-	configs, err := getKubeConfigSpecsBase(cfg)
-	return configs, errors.WithStack(err)
-}
-
-func getKubeConfigSpecsBase(cfg *kubeadmapi.InitConfiguration) (KubeConfigs, error) {
+func getKubeConfigSpecsBase(cfg *kubeadmapi.InitConfiguration) (map[string]*kubeConfigSpec, error) {
 	apiServer, err := kubeadmutil.GetControlPlaneEndpoint(cfg.ControlPlaneEndpoint, &cfg.LocalAPIEndpoint)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	return KubeConfigs{
+	return map[string]*kubeConfigSpec{
 		kubeadmconstants.AdminKubeConfigFileName: {
 			APIServer:  apiServer,
 			ClientName: "kubernetes-admin",
@@ -418,20 +391,14 @@ func getKubeConfigSpecsBase(cfg *kubeadmapi.InitConfiguration) (KubeConfigs, err
 	}, nil
 }
 
-// kubeConfigAndCSRCreator is used in ExternalCA mode to create kubeconfig files
-// and adjacent CSR files.
-type kubeConfigAndCSRCreator struct {
-	kubeConfigDir string
-	kubeadmConfig *kubeadmapi.InitConfiguration
-}
-
 var errExist = errors.New("file already exists")
 
-// create creates the the files.
-// Implements kubeConfigsVisitor.
-func (o *kubeConfigAndCSRCreator) create(name string, spec *kubeConfigSpec) error {
-	if o == nil {
-		return errors.Wrap(errInvalid, "create was called on a nil pointer")
+func createKubeConfigAndCSR(kubeConfigDir string, kubeadmConfig *kubeadmapi.InitConfiguration, name string, spec *kubeConfigSpec) error {
+	if kubeConfigDir == "" {
+		return errors.Wrap(errInvalid, "kubeConfigDir was empty")
+	}
+	if kubeadmConfig == nil {
+		return errors.Wrap(errInvalid, "kubeadmConfig was nil")
 	}
 	if name == "" {
 		return errors.Wrap(errInvalid, "name was empty")
@@ -439,13 +406,13 @@ func (o *kubeConfigAndCSRCreator) create(name string, spec *kubeConfigSpec) erro
 	if spec == nil {
 		return errors.Wrap(errInvalid, "spec was nil")
 	}
-	kubeConfigPath := filepath.Join(o.kubeConfigDir, name)
+	kubeConfigPath := filepath.Join(kubeConfigDir, name)
 	if _, err := os.Stat(kubeConfigPath); err == nil {
 		return errors.Wrapf(errExist, "kube config: %s", kubeConfigPath)
 	} else if !os.IsNotExist(err) {
 		return errors.WithStack(err)
 	}
-	if pkiutil.CSROrKeyExist(o.kubeConfigDir, name) {
+	if pkiutil.CSROrKeyExist(kubeConfigDir, name) {
 		return errors.Wrapf(errExist, "csr: %s", kubeConfigPath)
 	}
 
@@ -473,7 +440,7 @@ func (o *kubeConfigAndCSRCreator) create(name string, spec *kubeConfigSpec) erro
 	// create a kubeconfig with the client certs
 	config := kubeconfigutil.CreateWithCerts(
 		spec.APIServer,
-		o.kubeadmConfig.ClusterName,
+		kubeadmConfig.ClusterName,
 		spec.ClientName,
 		emptyCACert,
 		encodedClientKey,
@@ -484,19 +451,23 @@ func (o *kubeConfigAndCSRCreator) create(name string, spec *kubeConfigSpec) erro
 		return errors.WithStack(err)
 	}
 	// Write CSR to disk
-	if err := pkiutil.WriteCSR(o.kubeConfigDir, name, clientCSR); err != nil {
+	if err := pkiutil.WriteCSR(kubeConfigDir, name, clientCSR); err != nil {
 		return errors.WithStack(err)
 	}
 	return nil
 }
 
-// CreateKubeConfigAndCSRFiles is used in ExternalCA mode to create kubeconfig files
-// and adjacent CSR files for the supplied kubeConfigs
-func CreateKubeConfigAndCSRFiles(kubeConfigDir string, kubeadmConfig *kubeadmapi.InitConfiguration, kubeConfigs KubeConfigs) error {
-	return errors.WithStack(
-		kubeConfigs.visit((&kubeConfigAndCSRCreator{
-			kubeConfigDir: kubeConfigDir,
-			kubeadmConfig: kubeadmConfig,
-		}).create),
-	)
+// CreateDefaultKubeConfigsAndCSRFiles is used in ExternalCA mode to create
+// kubeconfig files and adjacent CSR files.
+func CreateDefaultKubeConfigsAndCSRFiles(kubeConfigDir string, kubeadmConfig *kubeadmapi.InitConfiguration) error {
+	kubeConfigs, err := getKubeConfigSpecsBase(kubeadmConfig)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	for name, spec := range kubeConfigs {
+		if err := createKubeConfigAndCSR(kubeConfigDir, kubeadmConfig, name, spec); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	return nil
 }

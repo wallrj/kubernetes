@@ -644,149 +644,7 @@ func TestValidateKubeconfigsForExternalCA(t *testing.T) {
 	}
 }
 
-func TestKubeConfigsVisit(t *testing.T) {
-	type testCase struct {
-		name          string
-		kcm           KubeConfigs
-		visitor       kubeConfigsVisitor
-		expectedError error
-		setup         func(t *testing.T, tc *testCase)
-		assertion     func(t *testing.T)
-	}
-
-	tests := []testCase{
-		{
-			name:          "error nil visitor",
-			kcm:           KubeConfigs{"config1": nil},
-			expectedError: errInvalid,
-		},
-		{
-			name: "nil map",
-			visitor: func(_ string, _ *kubeConfigSpec) error {
-				panic("should not be called")
-			},
-		},
-		{
-			name: "visit all",
-			kcm: KubeConfigs{
-				"config3": nil,
-				"config2": nil,
-				"config1": nil,
-			},
-			setup: func(t *testing.T, tc *testCase) {
-				var results []string
-				tc.visitor = func(name string, _ *kubeConfigSpec) error {
-					results = append(results, name)
-					return nil
-				}
-				tc.assertion = func(t *testing.T) {
-					assert.ElementsMatch(t, []string{"config1", "config2", "config3"}, results)
-				}
-			},
-		},
-		{
-			name: "visit then error",
-			kcm: KubeConfigs{
-				"config1": nil,
-				"config2": nil,
-				"config3": nil,
-			},
-			setup: func(t *testing.T, tc *testCase) {
-				errSentinel := errors.New("sentinel")
-				var visited []string
-				tc.visitor = func(name string, _ *kubeConfigSpec) error {
-					if name == "config2" {
-						return errSentinel
-					}
-					visited = append(visited, name)
-					return nil
-				}
-				tc.expectedError = errSentinel
-				tc.assertion = func(t *testing.T) {
-					assert.Less(t, len(visited), len(tc.kcm))
-				}
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if test.setup != nil {
-				test.setup(t, &test)
-			}
-			err := test.kcm.visit(test.visitor)
-			if test.expectedError == nil {
-				require.NoError(t, err)
-			} else {
-				if assert.Error(t, err) {
-					assert.Truef(t, errors.Is(err, test.expectedError), "unexpected error: %v", err)
-				}
-			}
-			if test.assertion != nil {
-				test.assertion(t)
-			}
-		})
-	}
-}
-
-func TestGetDefaultKubeConfigs(t *testing.T) {
-	errAny := errors.New("match any error")
-	type testCase struct {
-		name          string
-		cfg           *kubeadmapi.InitConfiguration
-		expectedError error
-		setup         func(t *testing.T, tc *testCase)
-	}
-	tests := []testCase{
-		{
-			name: "success",
-		},
-		{
-			name: "error nil cfg",
-			setup: func(t *testing.T, tc *testCase) {
-				tc.cfg = nil
-			},
-			expectedError: errInvalid,
-		},
-		{
-			name: "error invalid cfg",
-			setup: func(t *testing.T, tc *testCase) {
-				tc.cfg.LocalAPIEndpoint.BindPort = 0
-			},
-			expectedError: errAny,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			test.cfg = &kubeadmapi.InitConfiguration{
-				LocalAPIEndpoint: kubeadmapi.APIEndpoint{
-					AdvertiseAddress: "192.0.2.1",
-					BindPort:         1234,
-				},
-			}
-
-			// A hook to allow tests to change the defaults
-			if test.setup != nil {
-				test.setup(t, &test)
-			}
-
-			specs, err := GetDefaultKubeConfigs(test.cfg)
-
-			if test.expectedError == nil {
-				require.NoError(t, err)
-				assert.NoError(t, err)
-				assert.Len(t, specs, 4)
-			} else {
-				if assert.Error(t, err) {
-					if !errors.Is(test.expectedError, errAny) {
-						assert.Truef(t, errors.Is(err, test.expectedError), "unexpected error type: %#v", err)
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestKubeConfigAndCSRCreator(t *testing.T) {
+func TestCreateKubeConfigAndCSR(t *testing.T) {
 	errAny := errors.New("match any error")
 
 	touch := func(t *testing.T, existingFile string) {
@@ -799,7 +657,8 @@ func TestKubeConfigAndCSRCreator(t *testing.T) {
 
 	type testCase struct {
 		name           string
-		creator        *kubeConfigAndCSRCreator
+		kubeConfigDir  string
+		kubeadmConfig  *kubeadmapi.InitConfiguration
 		kubeConfigName string
 		kubeConfigSpec *kubeConfigSpec
 		setup          func(t *testing.T, tc *testCase)
@@ -811,9 +670,16 @@ func TestKubeConfigAndCSRCreator(t *testing.T) {
 			name: "success",
 		},
 		{
-			name: "error nil object",
+			name: "error empty kubeConfigDir",
 			setup: func(t *testing.T, tc *testCase) {
-				tc.creator = nil
+				tc.kubeConfigDir = ""
+			},
+			expectedError: errInvalid,
+		},
+		{
+			name: "error nil kubeadmConfig",
+			setup: func(t *testing.T, tc *testCase) {
+				tc.kubeadmConfig = nil
 			},
 			expectedError: errInvalid,
 		},
@@ -834,29 +700,29 @@ func TestKubeConfigAndCSRCreator(t *testing.T) {
 		{
 			name: "error conf file exists",
 			setup: func(t *testing.T, tc *testCase) {
-				touch(t, tc.creator.kubeConfigDir+"/"+tc.kubeConfigName)
+				touch(t, tc.kubeConfigDir+"/"+tc.kubeConfigName)
 			},
 			expectedError: errExist,
 		},
 		{
 			name: "error permission denied while checking if conf file exists",
 			setup: func(t *testing.T, tc *testCase) {
-				touch(t, tc.creator.kubeConfigDir+"/"+tc.kubeConfigName)
-				require.NoError(t, os.Chmod(tc.creator.kubeConfigDir, 0000))
+				touch(t, tc.kubeConfigDir+"/"+tc.kubeConfigName)
+				require.NoError(t, os.Chmod(tc.kubeConfigDir, 0000))
 			},
 			expectedError: os.ErrPermission,
 		},
 		{
 			name: "error csr file exists",
 			setup: func(t *testing.T, tc *testCase) {
-				touch(t, tc.creator.kubeConfigDir+"/"+tc.kubeConfigName+".csr")
+				touch(t, tc.kubeConfigDir+"/"+tc.kubeConfigName+".csr")
 			},
 			expectedError: errExist,
 		},
 		{
 			name: "error permission denied",
 			setup: func(t *testing.T, tc *testCase) {
-				require.NoError(t, os.Chmod(tc.creator.kubeConfigDir, 0500))
+				require.NoError(t, os.Chmod(tc.kubeConfigDir, 0500))
 			},
 			expectedError: os.ErrPermission,
 		},
@@ -866,12 +732,10 @@ func TestKubeConfigAndCSRCreator(t *testing.T) {
 			tmpDir := testutil.SetupTempDir(t)
 			defer os.RemoveAll(tmpDir)
 
-			test.creator = &kubeConfigAndCSRCreator{
-				kubeConfigDir: tmpDir,
-				kubeadmConfig: &kubeadmapi.InitConfiguration{
-					ClusterConfiguration: kubeadmapi.ClusterConfiguration{
-						ClusterName: "cluster1",
-					},
+			test.kubeConfigDir = tmpDir
+			test.kubeadmConfig = &kubeadmapi.InitConfiguration{
+				ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+					ClusterName: "cluster1",
 				},
 			}
 			test.kubeConfigName = "admin.conf"
@@ -893,7 +757,7 @@ func TestKubeConfigAndCSRCreator(t *testing.T) {
 				test.setup(t, &test)
 			}
 
-			err := test.creator.create(test.kubeConfigName, test.kubeConfigSpec)
+			err := createKubeConfigAndCSR(test.kubeConfigDir, test.kubeadmConfig, test.kubeConfigName, test.kubeConfigSpec)
 			if test.expectedError == nil {
 				require.NoError(t, err)
 			} else {
@@ -908,26 +772,6 @@ func TestKubeConfigAndCSRCreator(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCreateKubeConfigAndCSRFiles(t *testing.T) {
-	tmpDir := testutil.SetupTempDir(t)
-	defer os.RemoveAll(tmpDir)
-
-	err := CreateKubeConfigAndCSRFiles(
-		tmpDir,
-		&kubeadmapi.InitConfiguration{},
-		KubeConfigs{
-			"c1.conf": &kubeConfigSpec{
-				ClientCertAuth: &clientCertAuth{
-					Organizations: []string{"org1"},
-				},
-			},
-		},
-	)
-	require.NoError(t, err)
-	assert.FileExists(t, filepath.Join(tmpDir, "c1.conf"))
-	assert.FileExists(t, filepath.Join(tmpDir, "c1.conf.csr"))
 }
 
 // setupdKubeConfigWithClientAuth is a test utility function that wraps buildKubeConfigFromSpec for building a KubeConfig object With ClientAuth

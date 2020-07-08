@@ -169,19 +169,10 @@ func newCmdGenCSR() *cobra.Command {
 
 // runGenCSR contains the logic of the generate-csr sub-command.
 func runGenCSR(config *genCSRConfig) error {
-	leafCertificates, err := certsphase.LeafCertificates(certsphase.GetDefaultCertList())
-	if err != nil {
+	if err := certsphase.CreateDefaultKeysAndCSRFiles(config.kubeadmConfig); err != nil {
 		return errors.WithStack(err)
 	}
-	if err := certsphase.CreateKeyAndCSRFiles(config.kubeadmConfig, leafCertificates); err != nil {
-		return errors.WithStack(err)
-	}
-
-	kubeConfigs, err := kubeconfigphase.GetDefaultKubeConfigs(config.kubeadmConfig)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	if err := kubeconfigphase.CreateKubeConfigAndCSRFiles(config.kubeConfigDir, config.kubeadmConfig, kubeConfigs); err != nil {
+	if err := kubeconfigphase.CreateDefaultKubeConfigsAndCSRFiles(config.kubeConfigDir, config.kubeadmConfig); err != nil {
 		return errors.WithStack(err)
 	}
 	return nil
