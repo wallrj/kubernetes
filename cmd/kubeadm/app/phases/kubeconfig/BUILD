@@ -56,8 +56,5 @@ go_test(
         "//staging/src/k8s.io/client-go/tools/clientcmd:go_default_library",
         "//staging/src/k8s.io/client-go/tools/clientcmd/api:go_default_library",
         "//vendor/github.com/lithammer/dedent:go_default_library",
-        "//vendor/github.com/pkg/errors:go_default_library",
-        "//vendor/github.com/stretchr/testify/assert:go_default_library",
-        "//vendor/github.com/stretchr/testify/require:go_default_library",
     ],
 )
