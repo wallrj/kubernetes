@@ -836,7 +836,7 @@ func TestKubeConfigAndCSRCreator(t *testing.T) {
 			setup: func(t *testing.T, tc *testCase) {
 				touch(t, tc.creator.kubeConfigDir+"/"+tc.kubeConfigName)
 			},
-			expectedError: os.ErrExist,
+			expectedError: errExist,
 		},
 		{
 			name: "error permission denied while checking if conf file exists",
@@ -851,7 +851,7 @@ func TestKubeConfigAndCSRCreator(t *testing.T) {
 			setup: func(t *testing.T, tc *testCase) {
 				touch(t, tc.creator.kubeConfigDir+"/"+tc.kubeConfigName+".csr")
 			},
-			expectedError: os.ErrExist,
+			expectedError: errExist,
 		},
 		{
 			name: "error permission denied",

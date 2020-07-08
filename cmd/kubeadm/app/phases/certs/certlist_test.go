@@ -352,7 +352,7 @@ func TestCertificatesVisit(t *testing.T) {
 				var visited []string
 				tc.visitor = func(cert *KubeadmCert) error {
 					if cert.Name == "c2" {
-						return errSentinel
+						return errors.WithStack(errSentinel)
 					}
 					visited = append(visited, cert.Name)
 					return nil
@@ -440,7 +440,7 @@ func TestKeyAndCSRCreatorCreate(t *testing.T) {
 				certDir := tc.creator.kubeadmConfig.ClusterConfiguration.CertificatesDir
 				touch(t, certDir+"/"+tc.cert.BaseName+".key")
 			},
-			expectedError: os.ErrExist,
+			expectedError: errExist,
 		},
 		{
 			name: "error CSR file exists",
@@ -448,7 +448,7 @@ func TestKeyAndCSRCreatorCreate(t *testing.T) {
 				certDir := tc.creator.kubeadmConfig.ClusterConfiguration.CertificatesDir
 				touch(t, certDir+"/"+tc.cert.BaseName+".csr")
 			},
-			expectedError: os.ErrExist,
+			expectedError: errExist,
 		},
 		{
 			name: "error permission denied while creating key",

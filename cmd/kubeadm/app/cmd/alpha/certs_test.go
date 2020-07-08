@@ -32,7 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"k8s.io/client-go/tools/clientcmd"
-
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmapiv1beta2 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
@@ -336,11 +335,10 @@ func TestRunGenCSR(t *testing.T) {
 	}
 
 	err := runGenCSR(&config)
-	require.NoError(t, err)
+	require.NoError(t, err, "expected runGenCSR to not fail")
 
 	t.Log("The command generates key and CSR files in the configured --cert-dir")
 	for _, name := range expectedCertificates {
-		t.Log("::", name)
 		_, err = pkiutil.TryLoadKeyFromDisk(certDir, name)
 		assert.NoErrorf(t, err, "failed to load key file: %s", name)
 
@@ -350,14 +348,12 @@ func TestRunGenCSR(t *testing.T) {
 
 	t.Log("The command generates kubeconfig files in the configured --kubeconfig-dir")
 	for _, name := range expectedKubeConfigs {
-		t.Log("::", name)
 		_, err = clientcmd.LoadFromFile(kubeConfigDir + "/" + name + ".conf")
 		assert.NoErrorf(t, err, "failed to load kubeconfig file: %s", name)
 
 		_, err = pkiutil.TryLoadCSRFromDisk(kubeConfigDir, name+".conf")
 		assert.NoError(t, err, "failed to load kubeconfig CSR file: %s", name)
 	}
-
 }
 
 func TestGenCSRConfig(t *testing.T) {

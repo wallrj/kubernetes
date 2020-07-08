@@ -32,7 +32,6 @@ import (
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/client-go/util/keyutil"
 	"k8s.io/klog/v2"
-
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
@@ -124,7 +123,7 @@ func getKubeConfigSpecs(cfg *kubeadmapi.InitConfiguration) (map[string]*kubeConf
 	}
 	configs, err := getKubeConfigSpecsBase(cfg)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	for _, spec := range configs {
 		spec.CACert = caCert
@@ -367,11 +366,11 @@ type kubeConfigsVisitor func(string, *kubeConfigSpec) error
 // executes the supplied visitor function with each key, value pair.
 func (o KubeConfigs) visit(visitor kubeConfigsVisitor) error {
 	if visitor == nil {
-		return fmt.Errorf("%w: visitor was nil", errInvalid)
+		return errors.Wrap(errInvalid, "visitor was nil")
 	}
 	for name, spec := range o {
 		if err := visitor(name, spec); err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 	}
 	return nil
@@ -380,15 +379,16 @@ func (o KubeConfigs) visit(visitor kubeConfigsVisitor) error {
 // GetDefaultKubeConfigs returns all KubeConfigSpecs without CA key or certificate.
 func GetDefaultKubeConfigs(cfg *kubeadmapi.InitConfiguration) (KubeConfigs, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("%w: cfg was nil", errInvalid)
+		return nil, errors.Wrap(errInvalid, "cfg was nil")
 	}
-	return getKubeConfigSpecsBase(cfg)
+	configs, err := getKubeConfigSpecsBase(cfg)
+	return configs, errors.WithStack(err)
 }
 
 func getKubeConfigSpecsBase(cfg *kubeadmapi.InitConfiguration) (KubeConfigs, error) {
 	apiServer, err := kubeadmutil.GetControlPlaneEndpoint(cfg.ControlPlaneEndpoint, &cfg.LocalAPIEndpoint)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	return KubeConfigs{
 		kubeadmconstants.AdminKubeConfigFileName: {
@@ -425,42 +425,44 @@ type kubeConfigAndCSRCreator struct {
 	kubeadmConfig *kubeadmapi.InitConfiguration
 }
 
+var errExist = errors.New("file already exists")
+
 // create creates the the files.
 // Implements kubeConfigsVisitor.
 func (o *kubeConfigAndCSRCreator) create(name string, spec *kubeConfigSpec) error {
 	if o == nil {
-		return fmt.Errorf("%w: create was called on a nil pointer", errInvalid)
+		return errors.Wrap(errInvalid, "create was called on a nil pointer")
 	}
 	if name == "" {
-		return fmt.Errorf("%w: name was empty", errInvalid)
+		return errors.Wrap(errInvalid, "name was empty")
 	}
 	if spec == nil {
-		return fmt.Errorf("%w: spec was nil", errInvalid)
+		return errors.Wrap(errInvalid, "spec was nil")
 	}
 	kubeConfigPath := filepath.Join(o.kubeConfigDir, name)
 	if _, err := os.Stat(kubeConfigPath); err == nil {
-		return fmt.Errorf("%w: kube config: %s", os.ErrExist, kubeConfigPath)
+		return errors.Wrapf(errExist, "kube config: %s", kubeConfigPath)
 	} else if !os.IsNotExist(err) {
-		return err
+		return errors.WithStack(err)
 	}
 	if pkiutil.CSROrKeyExist(o.kubeConfigDir, name) {
-		return fmt.Errorf("%w: csr: %s", os.ErrExist, kubeConfigPath)
+		return errors.Wrapf(errExist, "csr: %s", kubeConfigPath)
 	}
 
 	clientCertConfig := newClientCertConfigFromKubeConfigSpec(spec)
 
 	clientKey, err := pkiutil.NewPrivateKey(clientCertConfig.PublicKeyAlgorithm)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	clientCSR, err := pkiutil.NewCSR(clientCertConfig, clientKey)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 
 	encodedClientKey, err := keyutil.MarshalPrivateKeyToPEM(clientKey)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 
 	var (
@@ -479,11 +481,11 @@ func (o *kubeConfigAndCSRCreator) create(name string, spec *kubeConfigSpec) erro
 	)
 
 	if err := kubeconfigutil.WriteToDisk(kubeConfigPath, config); err != nil {
-		return errors.Wrapf(err, "failed to save kubeconfig file %q on disk", kubeConfigPath)
+		return errors.WithStack(err)
 	}
 	// Write CSR to disk
 	if err := pkiutil.WriteCSR(o.kubeConfigDir, name, clientCSR); err != nil {
-		return errors.Wrap(err, "failed to write CSR file")
+		return errors.WithStack(err)
 	}
 	return nil
 }
@@ -491,8 +493,10 @@ func (o *kubeConfigAndCSRCreator) create(name string, spec *kubeConfigSpec) erro
 // CreateKubeConfigAndCSRFiles is used in ExternalCA mode to create kubeconfig files
 // and adjacent CSR files for the supplied kubeConfigs
 func CreateKubeConfigAndCSRFiles(kubeConfigDir string, kubeadmConfig *kubeadmapi.InitConfiguration, kubeConfigs KubeConfigs) error {
-	return kubeConfigs.visit((&kubeConfigAndCSRCreator{
-		kubeConfigDir: kubeConfigDir,
-		kubeadmConfig: kubeadmConfig,
-	}).create)
+	return errors.WithStack(
+		kubeConfigs.visit((&kubeConfigAndCSRCreator{
+			kubeConfigDir: kubeConfigDir,
+			kubeadmConfig: kubeadmConfig,
+		}).create),
+	)
 }

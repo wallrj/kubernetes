@@ -27,7 +27,6 @@ import (
 	"github.com/spf13/pflag"
 
 	"k8s.io/apimachinery/pkg/util/duration"
-
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmscheme "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/scheme"
 	kubeadmapiv1beta2 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2"
@@ -138,7 +137,7 @@ func (o *genCSRConfig) load() (err error) {
 		&kubeadmapiv1beta2.ClusterConfiguration{},
 	)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	// --cert-dir takes priority over kubeadm config if set.
 	if o.certDir != "" {
@@ -158,11 +157,10 @@ func newCmdGenCSR() *cobra.Command {
 		Example: generateCSRExample,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			err := config.load()
-			if err != nil {
-				return err
+			if err := config.load(); err != nil {
+				return errors.WithStack(err)
 			}
-			return runGenCSR(config)
+			return errors.WithStack(runGenCSR(config))
 		},
 	}
 	config.addFlagSet(cmd.Flags())
@@ -173,18 +171,18 @@ func newCmdGenCSR() *cobra.Command {
 func runGenCSR(config *genCSRConfig) error {
 	leafCertificates, err := certsphase.LeafCertificates(certsphase.GetDefaultCertList())
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	if err := certsphase.CreateKeyAndCSRFiles(config.kubeadmConfig, leafCertificates); err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 
 	kubeConfigs, err := kubeconfigphase.GetDefaultKubeConfigs(config.kubeadmConfig)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	if err := kubeconfigphase.CreateKubeConfigAndCSRFiles(config.kubeConfigDir, config.kubeadmConfig, kubeConfigs); err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	return nil
 }
